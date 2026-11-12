@@ -5,13 +5,23 @@ A chat agent with web search and durable, timestamped memory.
 ## Quick start
 
 ```bash
-cp .env.example .env        # then add your GEMINI_API_KEY
+cp .env.example .env        # then add your GEMINI_API_KEY and/or OPENROUTER_API_KEY
 npm install                 # zero third-party runtime packages
 npm run dev                 # open http://localhost:3000
 ```
 
 Requires **Node 20+**.  
 Get a free Gemini API key at <https://aistudio.google.com/app/apikey>.
+
+## Deployment
+
+Talky is container and cloud-ready:
+- **Render / Railway / Koyeb**: Connect this repo, set `GEMINI_API_KEY` (and `OPENROUTER_API_KEY`), and it will build and run automatically using the included `render.yaml` or `npm start`.
+- **Docker**:
+  ```bash
+  docker build -t talky .
+  docker run -p 3000:3000 --env-file .env talky
+  ```
 
 ## Features
 
