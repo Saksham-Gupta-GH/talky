@@ -363,6 +363,7 @@ async function sendMessage(raw) {
         let event;
         try { event = JSON.parse(raw); } catch { continue; }
         if (event.error) { showToast(event.error); break; }
+        if (event.notice) { showToast("⚡ " + event.notice); }
         if (event.delta) {
           accumulated += event.delta;
           textEl.replaceChildren();
