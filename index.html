@@ -1,0 +1,89 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="theme-color" content="#f7f8fc" />
+    <meta name="description" content="A thoughtful chat that searches the web and remembers what you asked, and when." />
+    <title>Talky — search that remembers</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link href="https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;600;700&family=Manrope:wght@400;500;600;700;800&display=swap" rel="stylesheet" />
+    <link rel="stylesheet" href="/styles.css" />
+    <link rel="stylesheet" href="/markdown.css" />
+    <link rel="stylesheet" href="/sky.css" />
+    <link rel="stylesheet" href="/layout-fix.css" />
+    <link rel="stylesheet" href="/blue-sky.css" />
+    <link rel="stylesheet" href="/top-nav.css" />
+  </head>
+  <body>
+    <div class="app-shell">
+      <aside class="sidebar" id="sidebar">
+        <div class="brand-row">
+          <a class="brand" href="/" aria-label="Talky home"><span class="brand-mark">t</span><span>talky</span></a>
+          <button class="icon-button mobile-close" id="closeSidebar" aria-label="Close sky map" title="Close sky map">×</button>
+          <button class="icon-button collapse-button" id="newChatTop" aria-label="New conversation" title="New conversation">⌕</button>
+        </div>
+        <button class="new-chat sky-new-chat" id="newChat"><span class="day-sky" aria-hidden="true"><span class="sun"></span><span class="sun-cloud sun-cloud-one"></span><span class="sun-cloud sun-cloud-two"></span></span><span class="new-chat-label">New chat</span><span class="shortcut">⌘ K</span></button>
+        <div class="section-label"><span>YOUR SPACE</span><button class="tiny-icon" aria-label="More options">···</button></div>
+        <button class="space-link selected" id="allChats"><span class="nav-icon blimp-icon" aria-hidden="true"><svg viewBox="0 0 42 24"><path d="M4 12c2-5 8-8 19-8 7 0 12 2 16 6l-4 2 4 2c-4 4-9 6-16 6C12 20 6 17 4 12Z" fill="currentColor"/><path d="m34 9 6-4v6l-5 1m-1 2 6 4v-6l-5-1M18 19v3h9v-3m-5-7h.1" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/><path d="M15 7c4-2 9-2 13-1" fill="none" stroke="#fff" stroke-opacity=".7" stroke-width="1.4" stroke-linecap="round"/></svg></span> All conversations <span class="count-pill" id="chatCount">0</span></button>
+        <div class="history-heading"><span>RECENT</span><button class="tiny-icon" id="clearSearch" aria-label="Clear search">⌕</button></div>
+        <div class="history-list" id="historyList"></div>
+        <div class="sidebar-spacer"></div>
+        <div class="sidebar-footer">
+          <div class="profile-avatar">T</div>
+          <div class="profile-copy"><strong>Your workspace</strong><span>Saved to this Talky server</span></div>
+          <button class="tiny-icon" title="Settings" aria-label="Settings">⚙</button>
+        </div>
+      </aside>
+
+      <main class="main-panel">
+        <header class="topbar">
+          <div class="mobile-brand"><button class="icon-button menu-button" id="openSidebar" aria-label="Open sky map" title="Open sky map"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m4 6 5-2 6 2 5-2v14l-5 2-6-2-5 2V6Z"/><path d="M9 4v14m6-12v14"/><circle cx="15" cy="9" r="1.5"/></svg></button><span class="brand-mark small">t</span></div>
+          <div class="breadcrumbs"><span>Talky</span><span class="crumb-divider">/</span><span id="breadcrumbTitle">New conversation</span></div>
+          <span class="nav-compass" aria-hidden="true"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="m15.8 8.2-2.6 7.6-2.6-2.6 5.2-5Z"/><path d="M12 3v2m0 14v2M3 12h2m14 0h2"/></svg></span>
+          
+        </header>
+
+        <section class="conversation" id="conversation">
+          <div class="welcome" id="welcome">
+            <div class="welcome-orbit"><div class="orbit-dot"></div><div class="welcome-mark">t</div><div class="orbit-spark">✦</div></div>
+            <div class="eyebrow"><span class="eyebrow-dot"></span> A little more thoughtful</div>
+            <h1>Good questions<br /><span>stay with you.</span></h1>
+            <p class="welcome-subtitle">Ask what you’re curious about. I’ll look it up, keep track of what we learn, and remember when we talked.</p>
+            <div class="suggestion-grid">
+              <button class="suggestion" data-prompt="Which note-taking apps have changed their pricing recently?"><span class="suggestion-icon lilac">↗</span><span><strong>Catch up on a change</strong><small>What’s different since I last asked?</small></span><span class="suggestion-arrow">↗</span></button>
+              <button class="suggestion" data-prompt="What did I ask you about last week?"><span class="suggestion-icon peach">◷</span><span><strong>Pick up where we left off</strong><small>Find something from a past chat</small></span><span class="suggestion-arrow">↗</span></button>
+              <button class="suggestion" data-prompt="What’s one genuinely useful thing happening in AI this week?"><span class="suggestion-icon mint">✦</span><span><strong>Explore something new</strong><small>Fresh research, with the receipts</small></span><span class="suggestion-arrow">↗</span></button>
+              <button class="suggestion" data-prompt="Help me compare the best options for a small team."><span class="suggestion-icon blue">▤</span><span><strong>Think something through</strong><small>Get a clear, considered answer</small></span><span class="suggestion-arrow">↗</span></button>
+            </div>
+          </div>
+          <div class="messages" id="messages" aria-live="polite"></div>
+        </section>
+
+        <div class="composer-area">
+          <div class="composer-wrap">
+            <form class="composer" id="composer">
+              <textarea id="messageInput" rows="1" maxlength="12000" placeholder="Ask anything, or pick up an old thread…" aria-label="Your message"></textarea>
+              <div class="composer-toolbar"><div class="composer-hints"><span class="tool-label" style="display:inline-flex;align-items:center;gap:4px;color:#979bad;font-size:9px;font-weight:500"><span class="search-glyph" style="color:#9389cd;font-size:13px;line-height:10px">⌕</span> Web search</span><span class="hint-divider"></span><span class="remember-hint"><span class="memory-glyph">◷</span> Remembers your chats</span></div><button class="send-button" id="sendButton" type="submit" aria-label="Send message" disabled><span>↑</span></button></div>
+            </form>
+            <div class="composer-note">Talky can make mistakes. Important details deserve a second look.</div>
+          </div>
+        </div>
+      </main>
+
+      <aside class="memory-panel" id="memoryPanel">
+        <div class="memory-header"><div><div class="panel-kicker"><span class="pulse-dot"></span> ALWAYS IN THE LOOP</div><h2>Your memory</h2></div><button class="icon-button" id="memoryInfo" aria-label="About memory">i</button></div>
+        <p class="memory-intro">The context that makes each conversation feel like a continuation.</p>
+        <div class="memory-callout"><div class="callout-icon">◷</div><div><strong>Questions, with a timestamp.</strong><span>So “what did I ask last Tuesday?” has a real answer.</span></div></div>
+        <div class="memory-section-head"><span>RECENT THREADS</span><span class="memory-count" id="memoryCount">0</span></div>
+        <div class="memory-threads" id="memoryThreads"></div>
+        <div class="memory-empty" id="memoryEmpty"><div class="empty-orbit">◷</div><strong>A little history goes a long way.</strong><span>Your conversations will show up here, ready to pick back up.</span></div>
+        <div class="memory-privacy"><span class="lock-icon">▣</span><span>Stored with this Talky server.<br /><button id="privacyInfo">Learn how it works</button></span></div>
+      </aside>
+    </div>
+    <div class="toast" id="toast" role="status"></div>
+    <div class="modal-backdrop" id="modal" hidden><div class="modal-card"><button class="modal-close" id="modalClose" aria-label="Close">×</button><div class="modal-icon">◷</div><h3>Memory that knows when</h3><p>Talky keeps your conversations with their timestamps in this server’s local data folder. When you refer to a date or an earlier topic, it brings the relevant exchange back into context before answering.</p><p>Current information is checked with web search. Earlier answers are re-checked when you ask if they’re still right.</p><button class="modal-done" id="modalDone">Got it</button></div></div>
+    <script type="module" src="/app.js"></script>
+  </body>
+</html>

@@ -1,0 +1,18 @@
+:root{--sky-blue:#72bee6;--sky-line:#77b9dc;--sky-ink:#244d68}
+body{background:linear-gradient(145deg,#63b5df 0%,#83c9eb 43%,#a6dcf4 100%);color:#244d68}
+.app-shell{background:#9ad6f0;box-shadow:0 0 50px #28678924}
+.sidebar{background:linear-gradient(180deg,#c7eafd 0%,#d8f1ff 52%,#c5e9fa 100%);border-right-color:#a9d7ee}
+.sidebar::before{opacity:.95;background:radial-gradient(ellipse at 18% 37%,#b6e5f8 0 23px,transparent 24px),radial-gradient(ellipse at 82% 62%,#bce8f9 0 34px,transparent 35px),radial-gradient(ellipse at 9% 78%,#bfe8f8 0 27px,transparent 28px),repeating-linear-gradient(132deg,transparent 0 49px,#73b8d21c 50px 51px,transparent 52px 92px)}
+.main-panel{background:linear-gradient(180deg,#8bc9e8 0%,#a1d9f2 55%,#b6e4f7 100%)}
+.topbar{background:#83c6e8;border-bottom-color:#78bddf}
+.breadcrumbs{color:#244f6b}.breadcrumbs span:last-child{color:#356987}.crumb-divider{color:#5d9bc0}
+.conversation{background:transparent}
+.main-panel::before{opacity:.72;background:radial-gradient(ellipse 94px 22px at 13% 15%,#e8f8ff 99%,transparent 100%),radial-gradient(ellipse 69px 17px at 22% 13%,#e8f8ff 99%,transparent 100%),radial-gradient(ellipse 122px 26px at 88% 33%,#eaf8ff 99%,transparent 100%),radial-gradient(ellipse 84px 18px at 95% 30%,#eaf8ff 99%,transparent 100%)}
+.welcome h1{color:#214761}.welcome h1 span{color:#416f9d}.welcome-subtitle{color:#365f79}.eyebrow{color:#38647e}.eyebrow-dot{background:#e9a947}
+.composer-area{background:linear-gradient(0deg,#9dd7f0 0%,#9dd7f0dc 48%,#9dd7f000 100%)}
+.composer{background:#fafdff;border-color:#7ebfdf;box-shadow:0 7px 21px #23658b1b}.composer:focus-within{border-color:#4da5d2;box-shadow:0 7px 23px #1b76a52b}.composer textarea::placeholder{color:#7396ab}
+.memory-panel{background:linear-gradient(180deg,#c8eafa,#e2f5ff);border-left-color:#a4d4eb}
+.memory-callout{background:#dff3ff;border-color:#b6e2f5}.memory-thread{background:#f7fcff;border-color:#c5e4f3}
+.memory-privacy{border-top-color:#b9dfef}.memory-section-head{color:#5d829a}.memory-intro,.memory-callout span{color:#527891}
+.suggestion{background:#f8fcff;border-color:#c3e3f2}.suggestion:hover{background:#fff;border-color:#87c4e2}
+@media(max-width:700px){.topbar{background:#83c6e8}.composer-area{background:linear-gradient(0deg,#9dd7f0 0%,#9dd7f0e8 55%,#9dd7f000 100%)}}

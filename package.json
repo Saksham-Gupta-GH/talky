@@ -1,0 +1,12 @@
+{
+  "name": "talky",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "A chat agent that searches the web and remembers what you asked and when.",
+  "scripts": {
+    "dev": "node --watch server.js 2>/dev/null || node server.js",
+    "start": "node server.js"
+  },
+  "engines": { "node": ">=20" }
+}
