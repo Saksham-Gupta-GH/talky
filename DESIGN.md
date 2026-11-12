@@ -5,6 +5,17 @@
 Talky is a Node ≥20 HTTP server (`server.js`) and a thin browser client (`app.js`).  
 The agent has exactly one tool: **Google Search grounding** via Gemini 2.5 Flash.
 
+### Provider strategy
+
+| Priority | Provider | Model | Search |
+|---|---|---|---|
+| Primary | Gemini (Google AI Studio) | `gemini-2.5-flash` | Native Google Search grounding — citations included in the same response |
+| Fallback | OpenRouter | `perplexity/sonar-pro` | Built-in Perplexity web search — no separate search API key needed |
+
+Talky retries Gemini twice on transient 5xx errors (1 s, 3 s back-off). On a `429 Resource Exhausted`, it marks Gemini as quota-exhausted for 60 s and routes the current request to OpenRouter instead. The browser receives a `notice` SSE event when the fallback activates; the UI experience is otherwise identical. Only one API key is strictly required; the other adds resilience.
+
+The fallback model must have its own web search capability. `perplexity/sonar-pro` was chosen because it is an online model with built-in retrieval — no second tool call, no scraping, same one-shot answer pattern as Gemini grounding.
+
 ### Request lifecycle
 
 1. The browser posts to `POST /api/chat/stream`.
@@ -65,7 +76,8 @@ The `extractEntities` function snapshots prices and product names from every ass
 | A second "memory tool" | The challenge limits the agent to one tool; server-side retrieval delivers memory as context, adding no tool round-trip |
 | Home-grown search scraper | Duplicates Gemini's ranking and citation work; brittle to HTML changes |
 | Provider-managed conversation state | Does not give the application timestamp-queryable records across chats or preserve citation provenance |
-| OpenAI / other providers | Gemini's native `googleSearch` grounding returns citations in the same call; no separate search API key or rate limit to manage |
+| OpenAI / other providers as primary | Gemini's native `googleSearch` grounding returns citations in the same call; no separate search API key or rate limit to manage |
+| OpenRouter as primary | Latency is higher and grounding metadata (per-claim citation support) is richer from Gemini; OpenRouter is better as a quota-exhaustion safety net |
 
 ---
 
@@ -89,3 +101,4 @@ npm run dev   # http://localhost:3000
 ```
 
 Requires Node 20 or later. No database setup required.
+

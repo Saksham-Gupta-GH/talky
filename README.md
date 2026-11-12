@@ -30,6 +30,8 @@ See [DESIGN.md](./DESIGN.md) for the full architecture write-up.
 
 | Variable | Required | Default | Description |
 |---|---|---|---|
-| `GEMINI_API_KEY` | ✅ | — | Gemini API key |
-| `GEMINI_MODEL` | | `gemini-2.5-flash` | Model name |
+| `GEMINI_API_KEY` | ✅ | — | Gemini API key ([get one free](https://aistudio.google.com/app/apikey)) |
+| `OPENROUTER_API_KEY` | | — | OpenRouter key — activates automatic fallback when Gemini quota is exhausted ([get one](https://openrouter.ai/keys)) |
+| `GEMINI_MODEL` | | `gemini-2.5-flash` | Primary model |
+| `OPENROUTER_MODEL` | | `perplexity/sonar-pro` | Fallback model (must have built-in web search) |
 | `PORT` | | `3000` | HTTP port |

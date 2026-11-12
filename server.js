@@ -3,18 +3,22 @@
  *
  * Single-file Node ≥20 HTTP server. No third-party runtime dependencies.
  *
- * Improvements over the original:
+ * Provider strategy:
+ *  - Primary:  Gemini 2.5 Flash  (native Google Search grounding, citations)
+ *  - Fallback: OpenRouter → perplexity/sonar-pro  (built-in web search)
+ *              Triggered automatically on Gemini 429 quota exhaustion.
+ *
+ * Other improvements over the original:
  *  - Security: static-file handler blocks .env, data/, .git/ paths
  *  - Streaming: SSE endpoint /api/chat/stream so the browser shows tokens as they arrive
- *  - Retries + back-off: Gemini 429/5xx are retried up to 3× with exponential back-off
- *  - Concurrency guard: one in-flight Gemini call per chat
+ *  - Retries + back-off: Gemini 429/5xx are retried up to 2× before falling back
+ *  - Concurrency guard: one in-flight call per chat
  *  - Config: .env is loaded before MODEL constant is evaluated (fix GEMINI_MODEL bug)
  *  - Date parsing: "last week", "this week", "N days ago", "past week", date ranges
- *  - Retrieval: semantic-ish TF-IDF token overlap + recency decay + date-first path
- *  - Structured memory snapshots: each assistant answer stores extracted entities (prices,
- *    products, tools) so "has the pricing changed?" has explicit old values to compare
+ *  - Retrieval: Jaccard token overlap + recency decay + date-first path
+ *  - Structured memory snapshots: extracted entities (prices, products) stored per answer
  *  - Grounding: groundingSupport segments linked to citations for per-claim attribution
- *  - npm run dev: uses --watch only if the kernel supports inotify, falls back to polling
+ *  - npm run dev: uses --watch, falls back to plain node on file-watcher limit
  */
 
 import http from "node:http";
@@ -58,6 +62,23 @@ try {
 }
 
 const MODEL = process.env.GEMINI_MODEL || "gemini-2.5-flash";
+
+// ── Provider config ───────────────────────────────────────────────────────────
+// Fallback model must have built-in web search so answers stay grounded.
+// perplexity/sonar-pro is the strongest Perplexity online model on OpenRouter.
+const OR_MODEL = process.env.OPENROUTER_MODEL || "perplexity/sonar-pro";
+const OR_BASE  = "https://openrouter.ai/api/v1";
+
+/** True when Gemini quota is exhausted and we should use OpenRouter instead. */
+let geminiQuotaExhausted = false;
+/** Reset the quota flag after 60 s so we retry Gemini on the next turn. */
+let quotaResetTimer = null;
+function markGeminiQuotaExhausted() {
+  geminiQuotaExhausted = true;
+  clearTimeout(quotaResetTimer);
+  quotaResetTimer = setTimeout(() => { geminiQuotaExhausted = false; }, 60_000);
+  console.warn("[talky] Gemini quota exhausted – falling back to OpenRouter for this turn.");
+}
 
 // ── Persistence ───────────────────────────────────────────────────────────────
 let state = { chats: [] };
@@ -394,10 +415,11 @@ function extractEntities(text) {
   };
 }
 
-// ── Gemini API with retries ───────────────────────────────────────────────────
-const RETRY_DELAYS = [1000, 3000, 7000]; // ms
+// ── Fetch helpers ─────────────────────────────────────────────────────────────
+// Retry delays for Gemini (before falling back to OpenRouter).
+const GEMINI_RETRY_DELAYS = [1000, 3000]; // 2 retries, then fall back
 
-async function fetchWithRetry(url, options, retries = RETRY_DELAYS) {
+async function fetchWithRetry(url, options, retries = GEMINI_RETRY_DELAYS) {
   for (let attempt = 0; ; attempt++) {
     let response;
     try {
@@ -408,7 +430,6 @@ async function fetchWithRetry(url, options, retries = RETRY_DELAYS) {
       continue;
     }
     if ((response.status === 429 || response.status >= 500) && attempt < retries.length) {
-      // Honour Retry-After if present
       const retryAfter = Number(response.headers.get("retry-after") || 0) * 1000;
       await sleep(retryAfter || retries[attempt]);
       continue;
@@ -421,191 +442,133 @@ function sleep(ms) {
   return new Promise((r) => setTimeout(r, ms));
 }
 
-// ── Core agent call (non-streaming) ──────────────────────────────────────────
-async function askAgent(chat, text, timezone) {
-  if (!process.env.GEMINI_API_KEY)
+// ── OpenRouter fallback (non-streaming) ───────────────────────────────────────
+/**
+ * Calls OpenRouter with perplexity/sonar-pro which has built-in web search.
+ * Uses the OpenAI-compatible chat completions endpoint.
+ */
+async function askOpenRouter(systemPrompt, messages) {
+  if (!process.env.OPENROUTER_API_KEY)
     throw Object.assign(
-      new Error(
-        "Add GEMINI_API_KEY to .env to turn on live answers and web search."
-      ),
+      new Error("Gemini quota exhausted and no OPENROUTER_API_KEY in .env. Add one to continue."),
       { status: 503 }
     );
 
-  const memory = makeMemoryContext(text, timezone, chat.id, chat);
-  const history = chat.messages
-    .slice(0, -1)
-    .slice(-12)
-    .map((m) => ({ role: m.role, content: m.content }));
-  history.push({ role: "user", content: text });
-
-  const contents = history.map((message) => ({
-    role: message.role === "assistant" ? "model" : "user",
-    parts: [{ text: message.content }],
-  }));
-
-  const systemInstruction = buildSystemPrompt(memory);
-  const body = {
-    systemInstruction: { parts: [{ text: systemInstruction }] },
-    contents,
-    tools: [{ googleSearch: {} }],
-    generationConfig: { maxOutputTokens: 1500, temperature: 0.2 },
-  };
+  const orMessages = [
+    { role: "system", content: systemPrompt },
+    ...messages.map((m) => ({ role: m.role === "assistant" ? "assistant" : "user", content: m.content })),
+  ];
 
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), 90_000);
   let response;
   try {
-    response = await fetchWithRetry(
-      `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(MODEL)}:generateContent`,
-      {
-        method: "POST",
-        signal: controller.signal,
-        headers: {
-          "x-goog-api-key": process.env.GEMINI_API_KEY,
-          "content-type": "application/json",
-        },
-        body: JSON.stringify(body),
-      }
-    );
+    response = await fetch(`${OR_BASE}/chat/completions`, {
+      method: "POST",
+      signal: controller.signal,
+      headers: {
+        "authorization": `Bearer ${process.env.OPENROUTER_API_KEY}`,
+        "content-type": "application/json",
+        "http-referer": "http://localhost:3000",
+        "x-title": "Talky",
+      },
+      body: JSON.stringify({
+        model: OR_MODEL,
+        messages: orMessages,
+        temperature: 0.2,
+        max_tokens: 1500,
+      }),
+    });
   } finally {
     clearTimeout(timeout);
   }
 
   const payload = await response.json().catch(() => ({}));
   if (!response.ok) {
-    const message =
-      payload.error?.message || `Gemini API returned ${response.status}.`;
-    throw Object.assign(new Error(message), {
-      status: response.status === 429 ? 429 : 502,
-    });
+    const msg = payload.error?.message || `OpenRouter returned ${response.status}.`;
+    throw Object.assign(new Error(msg), { status: 502 });
   }
 
-  const candidate = payload.candidates?.[0];
-  const answer = (candidate?.content?.parts || [])
-    .map((part) => part.text || "")
-    .join("")
-    .trim();
-
-  // Grounding: deduplicated citations
-  const citations = (candidate?.groundingMetadata?.groundingChunks || [])
-    .map(
-      (chunk) =>
-        chunk.web && { title: chunk.web.title || chunk.web.uri, url: chunk.web.uri }
-    )
-    .filter(Boolean);
-  const uniqueCitations = [
-    ...new Map(citations.map((c) => [c.url, c])).values(),
-  ].slice(0, 10);
-
-  // Per-claim citation support segments (bonus metadata for the UI)
-  const supportSegments = (
-    candidate?.groundingMetadata?.groundingSupport || []
-  ).map((seg) => ({
-    text: seg.segment?.text || "",
-    indices: seg.groundingChunkIndices || [],
-  }));
-
+  const answer = payload.choices?.[0]?.message?.content?.trim() || "";
   if (!answer)
-    throw Object.assign(
-      new Error("Talky didn't get a text answer back. Please try again."),
-      { status: 502 }
-    );
+    throw Object.assign(new Error("No answer from OpenRouter fallback."), { status: 502 });
 
-  const entities = extractEntities(answer);
-  return { answer, citations: uniqueCitations, supportSegments, model: MODEL, entities };
+  // Perplexity Sonar returns citations as an array of URL strings
+  const rawCitations = payload.citations || [];
+  const citations = rawCitations
+    .slice(0, 10)
+    .map((url) => ({ url, title: new URL(url).hostname }));
+
+  return { answer, citations, supportSegments: [], model: OR_MODEL, entities: extractEntities(answer), provider: "openrouter" };
 }
 
-// ── Streaming agent call (SSE) ────────────────────────────────────────────────
-async function askAgentStream(chat, text, timezone, res) {
-  if (!process.env.GEMINI_API_KEY) {
-    res.write(
-      `data: ${JSON.stringify({ error: "Add GEMINI_API_KEY to .env to turn on live answers." })}\n\n`
-    );
+// ── OpenRouter streaming fallback (SSE) ───────────────────────────────────────
+async function askOpenRouterStream(systemPrompt, messages, res) {
+  if (!process.env.OPENROUTER_API_KEY) {
+    res.write(`data: ${JSON.stringify({ error: "Gemini quota exhausted and no OPENROUTER_API_KEY set." })}\n\n`);
     res.end();
-    return;
+    return null;
   }
 
-  const memory = makeMemoryContext(text, timezone, chat.id, chat);
-  const history = chat.messages
-    .slice(0, -1)
-    .slice(-12)
-    .map((m) => ({ role: m.role, content: m.content }));
-  history.push({ role: "user", content: text });
-
-  const contents = history.map((message) => ({
-    role: message.role === "assistant" ? "model" : "user",
-    parts: [{ text: message.content }],
-  }));
-
-  const body = {
-    systemInstruction: { parts: [{ text: buildSystemPrompt(memory) }] },
-    contents,
-    tools: [{ googleSearch: {} }],
-    generationConfig: { maxOutputTokens: 1500, temperature: 0.2 },
-  };
+  const orMessages = [
+    { role: "system", content: systemPrompt },
+    ...messages.map((m) => ({ role: m.role === "assistant" ? "assistant" : "user", content: m.content })),
+  ];
 
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), 90_000);
   let upstream;
   try {
-    upstream = await fetchWithRetry(
-      `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(MODEL)}:streamGenerateContent?alt=sse`,
-      {
-        method: "POST",
-        signal: controller.signal,
-        headers: {
-          "x-goog-api-key": process.env.GEMINI_API_KEY,
-          "content-type": "application/json",
-        },
-        body: JSON.stringify(body),
-      }
-    );
+    upstream = await fetch(`${OR_BASE}/chat/completions`, {
+      method: "POST",
+      signal: controller.signal,
+      headers: {
+        "authorization": `Bearer ${process.env.OPENROUTER_API_KEY}`,
+        "content-type": "application/json",
+        "http-referer": "http://localhost:3000",
+        "x-title": "Talky",
+      },
+      body: JSON.stringify({
+        model: OR_MODEL,
+        messages: orMessages,
+        temperature: 0.2,
+        max_tokens: 1500,
+        stream: true,
+      }),
+    });
   } catch (err) {
     clearTimeout(timeout);
     res.write(`data: ${JSON.stringify({ error: err.message })}\n\n`);
     res.end();
-    return;
+    return null;
   }
 
   if (!upstream.ok) {
     clearTimeout(timeout);
     const payload = await upstream.json().catch(() => ({}));
-    const msg = payload.error?.message || `Gemini returned ${upstream.status}.`;
-    res.write(`data: ${JSON.stringify({ error: msg })}\n\n`);
+    res.write(`data: ${JSON.stringify({ error: payload.error?.message || `OpenRouter error ${upstream.status}` })}\n\n`);
     res.end();
-    return;
+    return null;
   }
 
   let fullText = "";
-  let finalCandidate = null;
-
   try {
     const reader = upstream.body.getReader();
     const decoder = new TextDecoder();
     let buffer = "";
-
     while (true) {
       const { done, value } = await reader.read();
       if (done) break;
       buffer += decoder.decode(value, { stream: true });
       const lines = buffer.split("\n");
-      buffer = lines.pop(); // keep incomplete line
+      buffer = lines.pop();
       for (const line of lines) {
         if (!line.startsWith("data:")) continue;
         const raw = line.slice(5).trim();
         if (!raw || raw === "[DONE]") continue;
         let chunk;
-        try {
-          chunk = JSON.parse(raw);
-        } catch {
-          continue;
-        }
-        const candidate = chunk.candidates?.[0];
-        if (!candidate) continue;
-        finalCandidate = candidate;
-        const delta = (candidate.content?.parts || [])
-          .map((p) => p.text || "")
-          .join("");
+        try { chunk = JSON.parse(raw); } catch { continue; }
+        const delta = chunk.choices?.[0]?.delta?.content || "";
         if (delta) {
           fullText += delta;
           res.write(`data: ${JSON.stringify({ delta })}\n\n`);
@@ -616,23 +579,195 @@ async function askAgentStream(chat, text, timezone, res) {
     clearTimeout(timeout);
   }
 
-  // Send citations at end
-  const citations = (finalCandidate?.groundingMetadata?.groundingChunks || [])
-    .map(
-      (chunk) =>
-        chunk.web && { title: chunk.web.title || chunk.web.uri, url: chunk.web.uri }
-    )
-    .filter(Boolean);
-  const uniqueCitations = [
-    ...new Map(citations.map((c) => [c.url, c])).values(),
-  ].slice(0, 10);
-
-  const entities = extractEntities(fullText);
-  res.write(
-    `data: ${JSON.stringify({ done: true, citations: uniqueCitations, entities })}\n\n`
-  );
+  res.write(`data: ${JSON.stringify({ done: true, citations: [], entities: extractEntities(fullText), provider: "openrouter" })}\n\n`);
   res.end();
-  return { answer: fullText, citations: uniqueCitations, entities };
+  return { answer: fullText, citations: [], entities: extractEntities(fullText), provider: "openrouter" };
+}
+
+// ── Core agent call (non-streaming) ──────────────────────────────────────────
+async function askAgent(chat, text, timezone) {
+  const hasGemini = Boolean(process.env.GEMINI_API_KEY);
+  const hasOpenRouter = Boolean(process.env.OPENROUTER_API_KEY);
+
+  if (!hasGemini && !hasOpenRouter)
+    throw Object.assign(
+      new Error("Add GEMINI_API_KEY (and optionally OPENROUTER_API_KEY) to .env to enable answers."),
+      { status: 503 }
+    );
+
+  const memory = makeMemoryContext(text, timezone, chat.id, chat);
+  const history = chat.messages
+    .slice(0, -1)
+    .slice(-12)
+    .map((m) => ({ role: m.role, content: m.content }));
+  history.push({ role: "user", content: text });
+  const systemPrompt = buildSystemPrompt(memory);
+
+  // ── Try Gemini (unless quota is currently exhausted) ─────────────────────
+  if (hasGemini && !geminiQuotaExhausted) {
+    const contents = history.map((m) => ({
+      role: m.role === "assistant" ? "model" : "user",
+      parts: [{ text: m.content }],
+    }));
+    const body = {
+      systemInstruction: { parts: [{ text: systemPrompt }] },
+      contents,
+      tools: [{ googleSearch: {} }],
+      generationConfig: { maxOutputTokens: 1500, temperature: 0.2 },
+    };
+
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 90_000);
+    let response;
+    try {
+      response = await fetchWithRetry(
+        `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(MODEL)}:generateContent`,
+        {
+          method: "POST",
+          signal: controller.signal,
+          headers: { "x-goog-api-key": process.env.GEMINI_API_KEY, "content-type": "application/json" },
+          body: JSON.stringify(body),
+        }
+      );
+    } finally {
+      clearTimeout(timeout);
+    }
+
+    if (response.status === 429 && hasOpenRouter) {
+      markGeminiQuotaExhausted();
+      console.log("[talky] Switching to OpenRouter fallback for this request.");
+    } else {
+      const payload = await response.json().catch(() => ({}));
+      if (!response.ok) {
+        const message = payload.error?.message || `Gemini API returned ${response.status}.`;
+        throw Object.assign(new Error(message), { status: response.status === 429 ? 429 : 502 });
+      }
+      const candidate = payload.candidates?.[0];
+      const answer = (candidate?.content?.parts || []).map((p) => p.text || "").join("").trim();
+      const citations = (candidate?.groundingMetadata?.groundingChunks || [])
+        .map((chunk) => chunk.web && { title: chunk.web.title || chunk.web.uri, url: chunk.web.uri })
+        .filter(Boolean);
+      const uniqueCitations = [...new Map(citations.map((c) => [c.url, c])).values()].slice(0, 10);
+      const supportSegments = (candidate?.groundingMetadata?.groundingSupport || [])
+        .map((seg) => ({ text: seg.segment?.text || "", indices: seg.groundingChunkIndices || [] }));
+      if (!answer)
+        throw Object.assign(new Error("Talky didn't get a text answer back. Please try again."), { status: 502 });
+      return { answer, citations: uniqueCitations, supportSegments, model: MODEL, entities: extractEntities(answer), provider: "gemini" };
+    }
+  }
+
+  // ── Fallback: OpenRouter ─────────────────────────────────────────────────
+  return askOpenRouter(systemPrompt, history);
+}
+
+// ── Streaming agent call (SSE) ────────────────────────────────────────────────
+async function askAgentStream(chat, text, timezone, res) {
+  const hasGemini = Boolean(process.env.GEMINI_API_KEY);
+  const hasOpenRouter = Boolean(process.env.OPENROUTER_API_KEY);
+
+  if (!hasGemini && !hasOpenRouter) {
+    res.write(`data: ${JSON.stringify({ error: "Add GEMINI_API_KEY to .env to enable live answers." })}\n\n`);
+    res.end();
+    return null;
+  }
+
+  const memory = makeMemoryContext(text, timezone, chat.id, chat);
+  const history = chat.messages
+    .slice(0, -1)
+    .slice(-12)
+    .map((m) => ({ role: m.role, content: m.content }));
+  history.push({ role: "user", content: text });
+  const systemPrompt = buildSystemPrompt(memory);
+
+  // ── Try Gemini streaming (unless quota is currently exhausted) ───────────
+  if (hasGemini && !geminiQuotaExhausted) {
+    const contents = history.map((m) => ({
+      role: m.role === "assistant" ? "model" : "user",
+      parts: [{ text: m.content }],
+    }));
+    const body = {
+      systemInstruction: { parts: [{ text: systemPrompt }] },
+      contents,
+      tools: [{ googleSearch: {} }],
+      generationConfig: { maxOutputTokens: 1500, temperature: 0.2 },
+    };
+
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 90_000);
+    let upstream;
+    let geminiOk = false;
+    try {
+      upstream = await fetchWithRetry(
+        `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(MODEL)}:streamGenerateContent?alt=sse`,
+        {
+          method: "POST",
+          signal: controller.signal,
+          headers: { "x-goog-api-key": process.env.GEMINI_API_KEY, "content-type": "application/json" },
+          body: JSON.stringify(body),
+        }
+      );
+
+      if (upstream.status === 429 && hasOpenRouter) {
+        clearTimeout(timeout);
+        markGeminiQuotaExhausted();
+        console.log("[talky] Gemini 429 on stream – switching to OpenRouter.");
+      } else if (!upstream.ok) {
+        clearTimeout(timeout);
+        const payload = await upstream.json().catch(() => ({}));
+        const msg = payload.error?.message || `Gemini returned ${upstream.status}.`;
+        res.write(`data: ${JSON.stringify({ error: msg })}\n\n`); res.end();
+        return null;
+      } else {
+        geminiOk = true;
+        let fullText = "";
+        let finalCandidate = null;
+        try {
+          const reader = upstream.body.getReader();
+          const decoder = new TextDecoder();
+          let buffer = "";
+          while (true) {
+            const { done, value } = await reader.read();
+            if (done) break;
+            buffer += decoder.decode(value, { stream: true });
+            const lines = buffer.split("\n");
+            buffer = lines.pop();
+            for (const line of lines) {
+              if (!line.startsWith("data:")) continue;
+              const raw = line.slice(5).trim();
+              if (!raw || raw === "[DONE]") continue;
+              let chunk; try { chunk = JSON.parse(raw); } catch { continue; }
+              const candidate = chunk.candidates?.[0];
+              if (!candidate) continue;
+              finalCandidate = candidate;
+              const delta = (candidate.content?.parts || []).map((p) => p.text || "").join("");
+              if (delta) { fullText += delta; res.write(`data: ${JSON.stringify({ delta })}\n\n`); }
+            }
+          }
+        } finally { clearTimeout(timeout); }
+
+        const citations = (finalCandidate?.groundingMetadata?.groundingChunks || [])
+          .map((chunk) => chunk.web && { title: chunk.web.title || chunk.web.uri, url: chunk.web.uri })
+          .filter(Boolean);
+        const uniqueCitations = [...new Map(citations.map((c) => [c.url, c])).values()].slice(0, 10);
+        const entities = extractEntities(fullText);
+        res.write(`data: ${JSON.stringify({ done: true, citations: uniqueCitations, entities, provider: "gemini" })}\n\n`);
+        res.end();
+        return { answer: fullText, citations: uniqueCitations, entities, provider: "gemini" };
+      }
+    } catch (err) {
+      clearTimeout(timeout);
+      if (!geminiOk && hasOpenRouter) {
+        markGeminiQuotaExhausted();
+      } else {
+        res.write(`data: ${JSON.stringify({ error: err.message })}\n\n`); res.end();
+        return null;
+      }
+    }
+  }
+
+  // ── Fallback: OpenRouter streaming ───────────────────────────────────────
+  res.write(`data: ${JSON.stringify({ notice: "Switched to backup provider (OpenRouter)." })}\n\n`);
+  return askOpenRouterStream(systemPrompt, history, res);
 }
 
 // ── System prompt builder ─────────────────────────────────────────────────────
@@ -932,3 +1067,4 @@ const port = Number(process.env.PORT || 3000);
 server.listen(port, () =>
   console.log(`Talky is ready at http://localhost:${port}`)
 );
+
