@@ -61,12 +61,12 @@ try {
   /* .env is optional */
 }
 
-const MODEL = process.env.GEMINI_MODEL || "gemini-2.0-flash";
+const MODEL = process.env.GEMINI_MODEL || "gemini-3.8-flash";
 
 // ── Provider config ───────────────────────────────────────────────────────────
 // Fallback model must have built-in web search so answers stay grounded.
-// perplexity/sonar-pro is the strongest Perplexity online model on OpenRouter.
-const OR_MODEL = process.env.OPENROUTER_MODEL || "perplexity/sonar-pro";
+// perplexity/sonar has live web search and works on standard OpenRouter credits.
+const OR_MODEL = process.env.OPENROUTER_MODEL || "perplexity/sonar";
 const OR_BASE  = "https://openrouter.ai/api/v1";
 
 /** True when Gemini quota is exhausted and we should use OpenRouter instead. */
@@ -77,7 +77,7 @@ function markGeminiQuotaExhausted() {
   geminiQuotaExhausted = true;
   clearTimeout(quotaResetTimer);
   quotaResetTimer = setTimeout(() => { geminiQuotaExhausted = false; }, 60_000);
-  console.warn("[talky] Gemini quota exhausted – falling back to OpenRouter for this turn.");
+  console.warn("[talky] Gemini unavailable or quota exhausted – switching to OpenRouter (Perplexity Sonar).");
 }
 
 // ── Persistence ───────────────────────────────────────────────────────────────
@@ -443,8 +443,20 @@ function sleep(ms) {
 }
 
 // ── OpenRouter fallback (non-streaming) ───────────────────────────────────────
+function extractCitationsFromText(text) {
+  const citations = [];
+  const seen = new Set();
+  for (const m of text.matchAll(/\[([^\]]+)\]\((https?:\/\/[^\s)]+)\)/g)) {
+    if (!seen.has(m[2])) {
+      seen.add(m[2]);
+      citations.push({ title: m[1], url: m[2] });
+    }
+  }
+  return citations.slice(0, 10);
+}
+
 /**
- * Calls OpenRouter with perplexity/sonar-pro which has built-in web search.
+ * Calls OpenRouter with perplexity/sonar which has built-in live web search.
  * Uses the OpenAI-compatible chat completions endpoint.
  */
 async function askOpenRouter(systemPrompt, messages) {
@@ -454,8 +466,10 @@ async function askOpenRouter(systemPrompt, messages) {
       { status: 503 }
     );
 
+  const enhancedPrompt = `${systemPrompt}\n\nAt the end of your response, always list the 2 to 4 primary sources you consulted under a '### Sources' heading as markdown links: [Title](url).`;
+
   const orMessages = [
-    { role: "system", content: systemPrompt },
+    { role: "system", content: enhancedPrompt },
     ...messages.map((m) => ({ role: m.role === "assistant" ? "assistant" : "user", content: m.content })),
   ];
 
@@ -476,7 +490,7 @@ async function askOpenRouter(systemPrompt, messages) {
         model: OR_MODEL,
         messages: orMessages,
         temperature: 0.2,
-        max_tokens: 1500,
+        max_tokens: 800,
       }),
     });
   } finally {
@@ -493,12 +507,7 @@ async function askOpenRouter(systemPrompt, messages) {
   if (!answer)
     throw Object.assign(new Error("No answer from OpenRouter fallback."), { status: 502 });
 
-  // Perplexity Sonar returns citations as an array of URL strings
-  const rawCitations = payload.citations || [];
-  const citations = rawCitations
-    .slice(0, 10)
-    .map((url) => ({ url, title: new URL(url).hostname }));
-
+  const citations = extractCitationsFromText(answer);
   return { answer, citations, supportSegments: [], model: OR_MODEL, entities: extractEntities(answer), provider: "openrouter" };
 }
 
@@ -510,8 +519,10 @@ async function askOpenRouterStream(systemPrompt, messages, res) {
     return null;
   }
 
+  const enhancedPrompt = `${systemPrompt}\n\nAt the end of your response, always list the 2 to 4 primary sources you consulted under a '### Sources' heading as markdown links: [Title](url).`;
+
   const orMessages = [
-    { role: "system", content: systemPrompt },
+    { role: "system", content: enhancedPrompt },
     ...messages.map((m) => ({ role: m.role === "assistant" ? "assistant" : "user", content: m.content })),
   ];
 
@@ -532,7 +543,7 @@ async function askOpenRouterStream(systemPrompt, messages, res) {
         model: OR_MODEL,
         messages: orMessages,
         temperature: 0.2,
-        max_tokens: 1500,
+        max_tokens: 800,
         stream: true,
       }),
     });
@@ -579,9 +590,10 @@ async function askOpenRouterStream(systemPrompt, messages, res) {
     clearTimeout(timeout);
   }
 
-  res.write(`data: ${JSON.stringify({ done: true, citations: [], entities: extractEntities(fullText), provider: "openrouter" })}\n\n`);
+  const citations = extractCitationsFromText(fullText);
+  res.write(`data: ${JSON.stringify({ done: true, citations, entities: extractEntities(fullText), provider: "openrouter" })}\n\n`);
   res.end();
-  return { answer: fullText, citations: [], entities: extractEntities(fullText), provider: "openrouter" };
+  return { answer: fullText, citations, entities: extractEntities(fullText), provider: "openrouter" };
 }
 
 // ── Core agent call (non-streaming) ──────────────────────────────────────────
@@ -629,31 +641,45 @@ async function askAgent(chat, text, timezone) {
           body: JSON.stringify(body),
         }
       );
+    } catch (fetchErr) {
+      if (hasOpenRouter) {
+        markGeminiQuotaExhausted();
+        console.warn(`[talky] Gemini fetch failed (${fetchErr.message}) – switching to OpenRouter.`);
+        return askOpenRouter(systemPrompt, history);
+      }
+      throw fetchErr;
     } finally {
       clearTimeout(timeout);
     }
 
-    if (response.status === 429 && hasOpenRouter) {
-      markGeminiQuotaExhausted();
-      console.log("[talky] Switching to OpenRouter fallback for this request.");
-    } else {
-      const payload = await response.json().catch(() => ({}));
-      if (!response.ok) {
-        const message = payload.error?.message || `Gemini API returned ${response.status}.`;
-        throw Object.assign(new Error(message), { status: response.status === 429 ? 429 : 502 });
+    if (!response.ok) {
+      if (hasOpenRouter) {
+        markGeminiQuotaExhausted();
+        console.warn(`[talky] Gemini error (${response.status}) – switching to OpenRouter fallback.`);
+        return askOpenRouter(systemPrompt, history);
       }
-      const candidate = payload.candidates?.[0];
-      const answer = (candidate?.content?.parts || []).map((p) => p.text || "").join("").trim();
-      const citations = (candidate?.groundingMetadata?.groundingChunks || [])
-        .map((chunk) => chunk.web && { title: chunk.web.title || chunk.web.uri, url: chunk.web.uri })
-        .filter(Boolean);
-      const uniqueCitations = [...new Map(citations.map((c) => [c.url, c])).values()].slice(0, 10);
-      const supportSegments = (candidate?.groundingMetadata?.groundingSupport || [])
-        .map((seg) => ({ text: seg.segment?.text || "", indices: seg.groundingChunkIndices || [] }));
-      if (!answer)
-        throw Object.assign(new Error("Talky didn't get a text answer back. Please try again."), { status: 502 });
-      return { answer, citations: uniqueCitations, supportSegments, model: MODEL, entities: extractEntities(answer), provider: "gemini" };
+      const payload = await response.json().catch(() => ({}));
+      const message = payload.error?.message || `Gemini API returned ${response.status}.`;
+      throw Object.assign(new Error(message), { status: response.status === 429 ? 429 : 502 });
     }
+
+    const payload = await response.json().catch(() => ({}));
+    const candidate = payload.candidates?.[0];
+    const answer = (candidate?.content?.parts || []).map((p) => p.text || "").join("").trim();
+    const citations = (candidate?.groundingMetadata?.groundingChunks || [])
+      .map((chunk) => chunk.web && { title: chunk.web.title || chunk.web.uri, url: chunk.web.uri })
+      .filter(Boolean);
+    const uniqueCitations = [...new Map(citations.map((c) => [c.url, c])).values()].slice(0, 10);
+    const supportSegments = (candidate?.groundingMetadata?.groundingSupport || [])
+      .map((seg) => ({ text: seg.segment?.text || "", indices: seg.groundingChunkIndices || [] }));
+    if (!answer) {
+      if (hasOpenRouter) {
+        markGeminiQuotaExhausted();
+        return askOpenRouter(systemPrompt, history);
+      }
+      throw Object.assign(new Error("Talky didn't get a text answer back. Please try again."), { status: 502 });
+    }
+    return { answer, citations: uniqueCitations, supportSegments, model: MODEL, entities: extractEntities(answer), provider: "gemini" };
   }
 
   // ── Fallback: OpenRouter ─────────────────────────────────────────────────
@@ -666,7 +692,7 @@ async function askAgentStream(chat, text, timezone, res) {
   const hasOpenRouter = Boolean(process.env.OPENROUTER_API_KEY);
 
   if (!hasGemini && !hasOpenRouter) {
-    res.write(`data: ${JSON.stringify({ error: "Add GEMINI_API_KEY to .env to enable live answers." })}\n\n`);
+    res.write(`data: ${JSON.stringify({ error: "Add GEMINI_API_KEY or OPENROUTER_API_KEY to .env to enable live answers." })}\n\n`);
     res.end();
     return null;
   }
@@ -707,66 +733,70 @@ async function askAgentStream(chat, text, timezone, res) {
         }
       );
 
-      if (upstream.status === 429 && hasOpenRouter) {
+      if (!upstream.ok) {
         clearTimeout(timeout);
-        markGeminiQuotaExhausted();
-        console.log("[talky] Gemini 429 on stream – switching to OpenRouter.");
-      } else if (!upstream.ok) {
-        clearTimeout(timeout);
+        if (hasOpenRouter) {
+          markGeminiQuotaExhausted();
+          console.warn(`[talky] Gemini returned ${upstream.status} – falling back to OpenRouter.`);
+          res.write(`data: ${JSON.stringify({ notice: "Using backup search provider (OpenRouter)." })}\n\n`);
+          return askOpenRouterStream(systemPrompt, history, res);
+        }
         const payload = await upstream.json().catch(() => ({}));
         const msg = payload.error?.message || `Gemini returned ${upstream.status}.`;
         res.write(`data: ${JSON.stringify({ error: msg })}\n\n`); res.end();
         return null;
-      } else {
-        geminiOk = true;
-        let fullText = "";
-        let finalCandidate = null;
-        try {
-          const reader = upstream.body.getReader();
-          const decoder = new TextDecoder();
-          let buffer = "";
-          while (true) {
-            const { done, value } = await reader.read();
-            if (done) break;
-            buffer += decoder.decode(value, { stream: true });
-            const lines = buffer.split("\n");
-            buffer = lines.pop();
-            for (const line of lines) {
-              if (!line.startsWith("data:")) continue;
-              const raw = line.slice(5).trim();
-              if (!raw || raw === "[DONE]") continue;
-              let chunk; try { chunk = JSON.parse(raw); } catch { continue; }
-              const candidate = chunk.candidates?.[0];
-              if (!candidate) continue;
-              finalCandidate = candidate;
-              const delta = (candidate.content?.parts || []).map((p) => p.text || "").join("");
-              if (delta) { fullText += delta; res.write(`data: ${JSON.stringify({ delta })}\n\n`); }
-            }
-          }
-        } finally { clearTimeout(timeout); }
-
-        const citations = (finalCandidate?.groundingMetadata?.groundingChunks || [])
-          .map((chunk) => chunk.web && { title: chunk.web.title || chunk.web.uri, url: chunk.web.uri })
-          .filter(Boolean);
-        const uniqueCitations = [...new Map(citations.map((c) => [c.url, c])).values()].slice(0, 10);
-        const entities = extractEntities(fullText);
-        res.write(`data: ${JSON.stringify({ done: true, citations: uniqueCitations, entities, provider: "gemini" })}\n\n`);
-        res.end();
-        return { answer: fullText, citations: uniqueCitations, entities, provider: "gemini" };
       }
+
+      geminiOk = true;
+      let fullText = "";
+      let finalCandidate = null;
+      try {
+        const reader = upstream.body.getReader();
+        const decoder = new TextDecoder();
+        let buffer = "";
+        while (true) {
+          const { done, value } = await reader.read();
+          if (done) break;
+          buffer += decoder.decode(value, { stream: true });
+          const lines = buffer.split("\n");
+          buffer = lines.pop();
+          for (const line of lines) {
+            if (!line.startsWith("data:")) continue;
+            const raw = line.slice(5).trim();
+            if (!raw || raw === "[DONE]") continue;
+            let chunk; try { chunk = JSON.parse(raw); } catch { continue; }
+            const candidate = chunk.candidates?.[0];
+            if (!candidate) continue;
+            finalCandidate = candidate;
+            const delta = (candidate.content?.parts || []).map((p) => p.text || "").join("");
+            if (delta) { fullText += delta; res.write(`data: ${JSON.stringify({ delta })}\n\n`); }
+          }
+        }
+      } finally { clearTimeout(timeout); }
+
+      const citations = (finalCandidate?.groundingMetadata?.groundingChunks || [])
+        .map((chunk) => chunk.web && { title: chunk.web.title || chunk.web.uri, url: chunk.web.uri })
+        .filter(Boolean);
+      const uniqueCitations = [...new Map(citations.map((c) => [c.url, c])).values()].slice(0, 10);
+      const entities = extractEntities(fullText);
+      res.write(`data: ${JSON.stringify({ done: true, citations: uniqueCitations, entities, provider: "gemini" })}\n\n`);
+      res.end();
+      return { answer: fullText, citations: uniqueCitations, entities, provider: "gemini" };
     } catch (err) {
       clearTimeout(timeout);
       if (!geminiOk && hasOpenRouter) {
         markGeminiQuotaExhausted();
-      } else {
-        res.write(`data: ${JSON.stringify({ error: err.message })}\n\n`); res.end();
-        return null;
+        console.warn(`[talky] Gemini stream failed (${err.message}) – falling back to OpenRouter.`);
+        res.write(`data: ${JSON.stringify({ notice: "Using backup search provider (OpenRouter)." })}\n\n`);
+        return askOpenRouterStream(systemPrompt, history, res);
       }
+      res.write(`data: ${JSON.stringify({ error: err.message })}\n\n`); res.end();
+      return null;
     }
   }
 
   // ── Fallback: OpenRouter streaming ───────────────────────────────────────
-  res.write(`data: ${JSON.stringify({ notice: "Switched to backup provider (OpenRouter)." })}\n\n`);
+  res.write(`data: ${JSON.stringify({ notice: "Using backup search provider (OpenRouter)." })}\n\n`);
   return askOpenRouterStream(systemPrompt, history, res);
 }
 

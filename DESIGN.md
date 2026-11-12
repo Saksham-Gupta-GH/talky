@@ -9,12 +9,12 @@ The agent has exactly one tool: **Google Search grounding** via Gemini 2.5 Flash
 
 | Priority | Provider | Model | Search |
 |---|---|---|---|
-| Primary | Gemini (Google AI Studio) | `gemini-2.5-flash` | Native Google Search grounding — citations included in the same response |
-| Fallback | OpenRouter | `perplexity/sonar-pro` | Built-in Perplexity web search — no separate search API key needed |
+| Primary | Gemini (Google AI Studio) | `gemini-3.8-flash` | Native Google Search grounding — citations included in the same response |
+| Fallback | OpenRouter | `perplexity/sonar` | Built-in Perplexity web search — no separate search API key needed |
 
-Talky retries Gemini twice on transient 5xx errors (1 s, 3 s back-off). On a `429 Resource Exhausted`, it marks Gemini as quota-exhausted for 60 s and routes the current request to OpenRouter instead. The browser receives a `notice` SSE event when the fallback activates; the UI experience is otherwise identical. Only one API key is strictly required; the other adds resilience.
+Talky retries Gemini on transient errors. If Gemini fails (rate limits, quota exhaustion, or service outage), it marks Gemini as quota-exhausted and seamlessly routes to OpenRouter instead. The browser receives a `notice` SSE event when the fallback activates; the UI experience is otherwise identical. Only one API key is strictly required; having both guarantees 100% uptime.
 
-The fallback model must have its own web search capability. `perplexity/sonar-pro` was chosen because it is an online model with built-in retrieval — no second tool call, no scraping, same one-shot answer pattern as Gemini grounding.
+The fallback model must have its own web search capability. `perplexity/sonar` was chosen because it is an online model with built-in retrieval — no second tool call, no scraping, same fast streaming answer pattern with live citations.
 
 ### Request lifecycle
 
