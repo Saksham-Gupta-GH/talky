@@ -2,6 +2,8 @@
 
 A chat agent with web search and durable, timestamped memory.
 
+🌐 **Live Demo:** [https://talky-5f68.onrender.com/](https://talky-5f68.onrender.com/)
+
 ## Quick start
 
 ```bash

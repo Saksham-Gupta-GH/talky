@@ -1,5 +1,7 @@
 # Talky – Design
 
+> **Live Demo:** [https://talky-5f68.onrender.com/](https://talky-5f68.onrender.com/)
+
 ## How it works
 
 Talky is a Node ≥20 HTTP server (`server.js`) and a thin browser client (`app.js`).  
